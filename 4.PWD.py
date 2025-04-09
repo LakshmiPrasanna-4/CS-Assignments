@@ -1,234 +1,211 @@
-# ----- Importing necessary libraries -----
-import joblib  # Importing joblib for saving and loading machine learning models.
-import tldextract  # Importing tldextract to extract domain information from URLs.
-import re  # Importing re for regular expression operations.
-import ssl  # Importing ssl for handling SSL certificates (not used in this script).
-import socket  # Importing socket for DNS resolution and IP address checks.
-import whois  # Importing whois for domain registration information (not used in this script).
-import datetime  # Importing datetime for date-related operations (not used in this script).
-import os  # Importing os for file path and existence checks.
-import pandas as pd  # Importing pandas for data manipulation and CSV handling.
-from flask import Flask, render_template_string, request, redirect, url_for  # Importing Flask components for web app development.
-from sklearn.ensemble import RandomForestClassifier  # Importing RandomForestClassifier for machine learning model creation.
-from sklearn.model_selection import train_test_split  # Importing train_test_split for splitting datasets.
-from sklearn.metrics import accuracy_score  # Importing accuracy_score for evaluating model performance.
-from urllib.parse import urlparse  # Importing urlparse for URL parsing.
-import webbrowser  # Importing webbrowser to open the app in a browser automatically.
-from threading import Timer  # Importing Timer to schedule tasks (e.g., opening the browser).
-import ipaddress  # Importing ipaddress for IP address validation and checks.
+# Importing necessary libraries
+import re  # Regular expression library for string matching and manipulation.
+import webbrowser  # Library to open URLs in a web browser.
+import threading  # Library to handle concurrent execution of threads.
+import tldextract  # Library to extract domain, subdomain, and suffix from URLs.
+from flask import Flask, render_template_string, request, redirect, url_for  # Flask framework for creating a web application.
+import Levenshtein  # Library to calculate the Levenshtein distance between strings.
 
 app = Flask(__name__)  # Creating a Flask application instance.
 
-# ----- Function to extract features from a URL -----
-def extract_features(url):  # Defining a function to extract features from a given URL.
-    parsed = urlparse(url)  # Parsing the URL into components using urlparse.
-    domain_info = tldextract.extract(url)  # Extracting domain information using tldextract.
-    
-    # ----- Function to check if an IP is private -----
-    def is_private_ip(ip):  # Defining a helper function to check if an IP is private.
-        try:  # Starting a try block to handle exceptions.
-            ip_obj = ipaddress.ip_address(ip)  # Creating an IP address object using ipaddress.
-            return ip_obj.is_private  # Returning True if the IP is private, otherwise False.
-        except ValueError:  # Handling ValueError if the IP is invalid.
-            return False  # Returning False if the IP is invalid.
+# Trusted domains list
+trusted_domains = [
+    'google.com', 'facebook.com', 'youtube.com', 'amazon.com', 'wikipedia.org',
+    'twitter.com', 'instagram.com', 'linkedin.com', 'netflix.com', 'microsoft.com',
+    'apple.com', 'adobe.com', 'paypal.com', 'dropbox.com', 'whatsapp.com'
+]  # A list of trusted domains to compare against user input.
 
-    # ----- Extracting host and checking for private IPs -----
-    host = parsed.hostname  # Extracting the hostname from the parsed URL.
-    is_private = False  # Initializing a variable to track if the IP is private.
-    ip_address = None  # Initializing a variable to store the resolved IP address.
-    is_fake_website = False  # Initializing a variable to track if the website is fake.
-
-    if host:  # Checking if the hostname exists.
-        # ----- Checking if the hostname is a valid IP -----
-        if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):  # Using regex to check if the hostname is an IP address.
-            ip_address = host  # Assigning the hostname to ip_address if it's an IP.
-            is_private = is_private_ip(ip_address)  # Checking if the IP is private.
-            if is_private:  # If the IP is private, marking the website as fake.
-                is_fake_website = True
-        else:  # If the hostname is not an IP, resolving it to an IP.
-            try:  # Starting a try block to handle DNS resolution errors.
-                ip_address = socket.gethostbyname(host)  # Resolving the hostname to an IP address.
-                is_private = is_private_ip(ip_address)  # Checking if the resolved IP is private.
-                if is_private:  # If the IP is private, marking the website as fake.
-                    is_fake_website = True
-            except socket.gaierror:  # Handling socket.gaierror if DNS resolution fails.
-                ip_address = None  # Setting IP address to None if resolution fails.
-                is_private = False  # Setting is_private to False if resolution fails.
-
-    # ----- Checking for suspicious patterns in the URL -----
-    if re.search(r'login|secure|update|verify|bank|account', url, re.IGNORECASE):  # Searching for suspicious keywords in the URL.
-        is_fake_website = True  # Marking the website as fake if suspicious keywords are found.
-
-    # ----- Extracting features -----
-    features = [  # Creating a list of features extracted from the URL.
-        1 if parsed.scheme == "https" else 0,  # Feature 1: HTTPS (1 if HTTPS, 0 if HTTP).
-        len(url),  # Feature 2: Length of the URL.
-        url.count('.'),  # Feature 3: Number of dots in the domain.
-        1 if '@' in url else 0,  # Feature 4: Presence of '@' symbol.
-        1 if url.find('//', 8) != -1 else 0,  # Feature 5: Presence of double slashes.
-        1 if '-' in domain_info.domain else 0,  # Feature 6: Presence of hyphen '-' in domain.
-        1 if re.search(r'login|secure|update|verify|bank|account|sure', url, re.IGNORECASE) else 0,  # Feature 7: Presence of phishing keywords.
-        len(domain_info.domain),  # Feature 8: Length of the domain name.
-        sum(c.isdigit() for c in url),  # Feature 9: Number of digits in the URL.
-        url.count('?'),  # Feature 10: Number of parameters in the URL.
-        1 if is_private else 0,  # Feature 11: 1 if URL contains a private IP, 0 if not.
-        1 if is_fake_website else 0  # Feature 12: Flag if it's a fake website.
-    ]
-    
-    return features  # Returning the list of extracted features.
-
-# ----- Function to train the machine learning model -----
-def train_model():  # Defining a function to train the machine learning model.
-    try:  # Starting a try block to handle exceptions.
-        df = pd.read_csv("dataset.csv")  # Reading the dataset from a CSV file.
-        df['features'] = df['url'].apply(extract_features)  # Extracting features for each URL in the dataset.
-        X = list(df['features'])  # Creating a list of feature vectors.
-        y = list(df['label'])  # Creating a list of labels (phishing or legitimate).
-
-        # ----- Splitting the dataset into training and testing sets -----
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)  # Splitting the data into 80% training and 20% testing.
-        
-        # ----- Creating and training the RandomForest model -----
-        model = RandomForestClassifier(n_estimators=200, random_state=42)  # Creating a RandomForestClassifier with 200 trees.
-        model.fit(X_train, y_train)  # Training the model on the training data.
-
-        # ----- Evaluating the model -----
-        y_pred = model.predict(X_test)  # Making predictions on the test data.
-        acc = accuracy_score(y_test, y_pred)  # Calculating the accuracy of the model.
-        print(f"[Model Trained] Accuracy: {acc * 100:.2f}%")  # Printing the accuracy of the trained model.
-        
-        # ----- Saving the model -----
-        joblib.dump(model, "phishing_model_with_ip_detection_and_fake_check.pkl")  # Saving the trained model to a file.
-        return model, acc  # Returning the trained model and its accuracy.
-    except Exception as e:  # Handling any exceptions that occur during training.
-        print("[Training Error]", e)  # Printing the error message.
-        raise e  # Raising the exception to stop execution.
-
-# ----- Function to load or train the model -----
-def load_or_train_model():  # Defining a function to load or train the model.
-    if os.path.exists("phishing_model_with_ip_detection_and_fake_check.pkl"):  # Checking if the model file exists.
-        print("[Model Loaded] phishing_model_with_ip_detection_and_fake_check.pkl found and loaded.")  # Printing a message if the model is loaded.
-        model = joblib.load("phishing_model_with_ip_detection_and_fake_check.pkl")  # Loading the model from the file.
-        return model, None  # Returning the loaded model and None for accuracy.
-    else:  # If the model file does not exist, training a new model.
-        print("[Model Not Found] Training new model...")  # Printing a message indicating that a new model will be trained.
-        return train_model()  # Calling the train_model function to train a new model.
-
-model, model_accuracy = load_or_train_model()  # Loading or training the model and storing it in variables.
-
-# ----- Function to calculate star rating -----
-def get_star_rating(confidence, is_phishing=False):  # Defining a function to calculate star ratings.
-    if is_phishing:  # Checking if the website is phishing.
-        if confidence > 80:  # Assigning 5 stars for high confidence phishing.
-            return 5
-        elif confidence > 60:  # Assigning 4 stars for moderate confidence phishing.
-            return 4
-        elif confidence > 40:  # Assigning 3 stars for low confidence phishing.
-            return 3
-        elif confidence > 20:  # Assigning 2 stars for very low confidence phishing.
-            return 2
-        else:  # Assigning 1 star for minimal confidence phishing.
-            return 1
-    else:  # If the website is legitimate, assigning stars based on safety confidence.
-        if confidence > 80:  # Assigning 5 stars for high confidence safety.
-            return 5
-        elif confidence > 60:  # Assigning 4 stars for moderate confidence safety.
-            return 4
-        elif confidence > 40:  # Assigning 3 stars for low confidence safety.
-            return 3
-        elif confidence > 20:  # Assigning 2 stars for very low confidence safety.
-            return 2
-        else:  # Assigning 1 star for minimal confidence safety.
-            return 1
-
-# ----- Flask route for the home page -----
-@app.route("/", methods=["GET", "POST"])  # Defining the root route for the Flask app.
-def index():  # Defining the index function for handling requests.
-    prediction = None  # Initializing a variable to store the prediction result.
-    url_input = ""  # Initializing a variable to store the input URL.
-    confidence = None  # Initializing a variable to store the confidence score.
-    rating_stars = ""  # Initializing a variable to store the star rating.
-    rating_text = ""  # Initializing a variable to store the rating text.
-    accuracy = model_accuracy * 100 if model_accuracy else None  # Calculating the model accuracy as a percentage.
-    current_accuracy = None  # Initializing a variable to store real-time accuracy.
-
-    if request.method == "POST":  # Checking if the request method is POST.
-        action = request.form.get("action")  # Getting the action from the form submission.
-        if action == "Check":  # Checking if the action is "Check".
-            url_input = request.form["url"]  # Getting the URL input from the form.
-            features = extract_features(url_input)  # Extracting features from the input URL.
-            
-            # ----- Making predictions -----
-            proba = model.predict_proba([features])[0]  # Getting the probability scores for the prediction.
-            pred = model.predict([features])[0]  # Getting the predicted label (phishing or legitimate).
-
-            # ----- Calculating confidence -----
-            phishing_conf = proba[1] * 100  # Calculating the confidence for phishing.
-            legit_conf = proba[0] * 100  # Calculating the confidence for legitimacy.
-
-            if pred == 1:  # If the prediction is phishing.
-                prediction = "🚨 Phishing Website!"  # Setting the prediction message.
-                confidence = phishing_conf  # Setting the confidence score.
-                stars = get_star_rating(phishing_conf, is_phishing=True)  # Calculating the star rating.
-                rating_text = f"Danger Rating: {stars} out of 5"  # Setting the rating text.
-            else:  # If the prediction is legitimate.
-                prediction = "✅ Legitimate Website"  # Setting the prediction message.
-                confidence = legit_conf  # Setting the confidence score.
-                stars = get_star_rating(legit_conf, is_phishing=False)  # Calculating the star rating.
-                rating_text = f"Safety Rating: {stars} out of 5"  # Setting the rating text.
-
-            rating_stars = "⭐" * stars + "☆" * (5 - stars)  # Creating the star rating string.
-
-            # ----- Simulating real-time accuracy -----
-            total_urls = 100  # Simulating a batch of 100 URLs for real-time accuracy.
-            correct_predictions = 0  # Initializing a counter for correct predictions.
-            for _ in range(total_urls):  # Iterating through the simulated URLs.
-                if model.predict([features])[0] == pred:  # Checking if the prediction matches.
-                    correct_predictions += 1  # Incrementing the correct predictions counter.
-            current_accuracy = (correct_predictions / total_urls) * 100  # Calculating the simulated accuracy.
-
-        elif action == "Clear":  # If the action is "Clear".
-            return redirect(url_for("index"))  # Redirecting to the index page.
-
-    return render_template_string("""<!doctype html>
-    <html lang="en"><head><title>Phishing Detector</title>
+# HTML Template
+template = """
+<!DOCTYPE html> <!-- Declares the document type and version of HTML. -->
+<html>
+<head>
+    <title>Phishing Website Detector</title> <!-- Title of the webpage displayed in the browser tab. -->
     <style>
-      body { font-family: Arial; text-align: center; background: #f0f4f8; padding-top: 50px; }
-      input { padding: 10px; width: 350px; font-size: 16px; border-radius: 8px; }
-      button { padding: 10px 20px; font-size: 16px; border-radius: 8px; border: none; color: white; }
-      .btn-check { background-color: #3498db; }
-      .btn-clear { background-color: #2ecc71; }
-      .result { font-size: 24px; margin-top: 20px; font-weight: bold; }
-      .confidence, .rating-text, .stars { font-size: 18px; margin-top: 10px; }
-      .stars { font-size: 22px; color: #f1c40f; }
-      .accuracy { font-size: 18px; margin-top: 10px; color: #2ecc71; }
-    </style></head>
-    <body>
-      <h1>Phishing Website Detector</h1>
-      {% if accuracy %}
-        <div class="accuracy">Model Accuracy: {{ accuracy|round(2) }}%</div>
-      {% endif %}
-      {% if current_accuracy %}
-        <div class="accuracy">Current Running Accuracy: {{ current_accuracy|round(2) }}%</div>
-      {% endif %}
-      <form method="POST">
-        <input type="text" name="url" placeholder="Enter a URL to check" value="{{ url_input }}" required><br><br>
-        <button type="submit" name="action" value="Check" class="btn-check">Check URL</button>
-        <button type="submit" name="action" value="Clear" class="btn-clear">Clear</button>
-      </form>
-      {% if prediction %}
-        <div class="result">{{ prediction }}</div>
-        <div class="confidence">Confidence: {{ confidence|round(2) }}%</div>
-        <div class="rating-text">{{ rating_text }}</div>
-        <div class="stars">{{ rating_stars }}</div>
-      {% endif %}
-    </body></html>
-    """, prediction=prediction, url_input=url_input, confidence=confidence, rating_text=rating_text, rating_stars=rating_stars, accuracy=accuracy, current_accuracy=current_accuracy)  # Rendering the HTML template with dynamic content.
+        body {
+            font-family: Arial, sans-serif; /* Sets the font family for the entire page. */
+            background: #eef2f7; /* Sets a light blue-gray background color for the page. */
+            display: flex; /* Uses Flexbox to center the content vertically and horizontally. */
+            justify-content: center; /* Centers the content horizontally. */
+            align-items: center; /* Centers the content vertically. */
+            height: 100vh; /* Sets the height of the body to 100% of the viewport height. */
+        }
+        .container {
+            background: white; /* Sets the background color of the container to white. */
+            padding: 30px; /* Adds padding inside the container for spacing. */
+            border-radius: 15px; /* Rounds the corners of the container. */
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2); /* Adds a subtle shadow effect to the container. */
+            width: 500px; /* Sets a fixed width for the container. */
+            text-align: center; /* Centers the text inside the container. */
+        }
+        input[type="text"] {
+            width: 90%; /* Makes the input field take up 90% of the container's width. */
+            padding: 10px; /* Adds padding inside the input field for better usability. */
+            border-radius: 8px; /* Rounds the corners of the input field. */
+            border: 1px solid #ccc; /* Adds a light gray border around the input field. */
+            margin-bottom: 20px; /* Adds space below the input field. */
+        }
+        .buttons {
+            display: flex; /* Uses Flexbox to align buttons horizontally. */
+            justify-content: space-around; /* Distributes buttons evenly with space between them. */
+        }
+        input[type="submit"], button {
+            background: #4CAF50; /* Sets the background color of the "Check URL" button to green. */
+            color: white; /* Sets the text color of the button to white. */
+            padding: 10px 25px; /* Adds padding inside the button for better clickability. */
+            border: none; /* Removes the default border of the button. */
+            border-radius: 8px; /* Rounds the corners of the button. */
+            cursor: pointer; /* Changes the cursor to a pointer when hovering over the button. */
+        }
+        button {
+            background: #f44336; /* Sets the background color of the "Clear" button to red. */
+        }
+        .result {
+            margin-top: 20px; /* Adds space above the result section. */
+            padding: 15px; /* Adds padding inside the result section for spacing. */
+            border-radius: 10px; /* Rounds the corners of the result section. */
+            font-size: 18px; /* Sets the font size of the result text. */
+        }
+        .legit {
+            background-color: #d4edda; /* Sets the background color for legitimate results (green). */
+            color: #155724; /* Sets the text color for legitimate results (dark green). */
+        }
+        .phishing {
+            background-color: #f8d7da; /* Sets the background color for phishing results (red). */
+            color: #721c24; /* Sets the text color for phishing results (dark red). */
+        }
+        .confidence, .accuracy, .rating {
+            margin-top: 10px; /* Adds space above these sections for better readability. */
+            font-size: 16px; /* Sets the font size for these sections. */
+        }
+        .stars {
+            color: gold; /* Sets the color of the star rating to gold. */
+            font-size: 24px; /* Sets the font size of the stars. */
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Phishing Website Detector</h2> <!-- Main heading of the webpage. -->
+        <form method="post"> <!-- Form to submit user input. -->
+            <input type="text" name="url" placeholder="Enter website URL" value="{{ url or '' }}" required><br>
+            <!-- Input field for entering the URL. Placeholder provides guidance to the user. The "value" attribute dynamically fills the field if available. -->
+            <div class="buttons">
+                <input type="submit" value="Check URL"> <!-- Submit button to check the URL. -->
+                <button type="submit" name="clear" value="clear">Clear</button> <!-- Clear button to reset the form. -->
+            </div>
+        </form>
+        {% if result %}
+            <div class="result {{ result_class }}"> <!-- Displays the result (legitimate or phishing). -->
+                {{ result }} <!-- Dynamically inserts the result message (e.g., "Legitimate Website"). -->
+            </div>
+            <div class="confidence"><strong>Confidence:</strong> {{ confidence }}%</div> <!-- Displays the confidence score. -->
+            <div class="accuracy"><strong>Model Accuracy:</strong> {{ accuracy }}%</div> <!-- Displays the model accuracy. -->
+            <div class="rating"><strong>Rating:</strong> <span class="stars">{{ stars|safe }}</span></div> <!-- Displays the star rating. -->
+        {% endif %} <!-- Ends the conditional block for displaying results. -->
+    </div>
+</body>
+</html>
+"""  # HTML template for rendering the phishing detector UI with dynamic content.
 
-# ----- Function to open the browser automatically -----
-def open_browser():  # Defining a function to open the browser.
-    webbrowser.open_new("http://127.0.0.1:5000")  # Opening the app in the default browser.
+# Check domain spelling
+def is_domain_misspelled(url):
+    extracted = tldextract.extract(url)  # Extracts subdomain, domain, and suffix from the URL.
+    domain = f"{extracted.domain}.{extracted.suffix}".lower()  # Combines domain and suffix into a lowercase string.
+    return domain not in [t.lower() for t in trusted_domains]  # Checks if the domain is not in the trusted domains list.
 
-if __name__ == "__main__":  # Checking if the script is run directly.
-    Timer(1, open_browser).start()  # Scheduling the browser to open after 1 second.
-    app.run(debug=True)  # Running the Flask app in debug mode.
+# Dynamically calculate confidence
+def calculate_confidence(url):
+    extracted = tldextract.extract(url)  # Extracts subdomain, domain, and suffix from the URL.
+    full_domain = f"{extracted.domain}.{extracted.suffix}".lower()  # Combines domain and suffix into a lowercase string.
+    distances = [Levenshtein.distance(full_domain, trusted) for trusted in trusted_domains]  # Calculates Levenshtein distance between the input domain and each trusted domain.
+    min_distance = min(distances)  # Finds the smallest distance (most similar trusted domain).
+    subdomain_penalty = len(extracted.subdomain.split('.')) * 5 if extracted.subdomain else 0  # Adds penalty for long subdomains.
+    total_penalty = min_distance * 10 + subdomain_penalty  # Calculates total penalty based on distance and subdomain length.
+    confidence = max(20, 100 - total_penalty)  # Calculates confidence score, ensuring it doesn't drop below 20%.
+    return confidence  # Returns the calculated confidence score.
+
+# Dynamic star rating
+def get_star_rating(confidence, is_phishing):
+    if is_phishing:
+        # For phishing websites: higher confidence = more stars (more dangerous)
+        if confidence >= 80:  # If confidence is very high, return 5 stars.
+            return '★★★★★'
+        elif confidence >= 60:  # If confidence is moderately high, return 4 stars.
+            return '★★★★☆'
+        elif confidence >= 40:  # If confidence is moderate, return 3 stars.
+            return '★★★☆☆'
+        elif confidence >= 20:  # If confidence is low, return 2 stars.
+            return '★★☆☆☆'
+        else:  # If confidence is very low, return 1 star.
+            return '★☆☆☆☆'
+    else:
+        # For legitimate websites: higher confidence = more stars (more trustworthy)
+        if confidence >= 90:  # If confidence is very high, return 5 stars.
+            return '★★★★★'
+        elif confidence >= 70:  # If confidence is moderately high, return 4 stars.
+            return '★★★★☆'
+        elif confidence >= 50:  # If confidence is moderate, return 3 stars.
+            return '★★★☆☆'
+        elif confidence >= 30:  # If confidence is low, return 2 stars.
+            return '★★☆☆☆'
+        else:  # If confidence is very low, return 1 star.
+            return '★☆☆☆☆'
+
+# Dynamic accuracy based on sample test URLs
+def compute_accuracy():
+    test_data = [
+        ('https://google.com', False),  # Test case for a legitimate website.
+        ('https://facebook.com', False),  # Test case for a legitimate website.
+        ('https://paypal.com', False),  # Test case for a legitimate website.
+        ('https://faceboook.com', True),  # Test case for a phishing website (misspelled domain).
+        ('https://secure-paypol.com', True),  # Test case for a phishing website (misspelled domain).
+        ('https://dropbox-fileshare.com', True),  # Test case for a phishing website (untrusted domain).
+        ('https://netflix.com', False),  # Test case for a legitimate website.
+        ('https://amazonn.com', True)  # Test case for a phishing website (misspelled domain).
+    ]  # A list of test URLs and their expected phishing status.
+    correct = 0  # Counter for correct predictions.
+    for url, expected_phishing in test_data:  # Iterates through each test case.
+        prediction = is_domain_misspelled(url)  # Predicts whether the domain is phishing.
+        if prediction == expected_phishing:  # Compares the prediction with the expected result.
+            correct += 1  # Increments the counter if the prediction matches the expected result.
+    return int((correct / len(test_data)) * 100)  # Calculates and returns the accuracy as a percentage.
+
+@app.route('/', methods=['GET', 'POST'])  # Defines the root route for the Flask app, allowing GET and POST requests.
+def index():
+    if request.method == 'POST':  # Checks if the request method is POST.
+        if 'clear' in request.form:  # Checks if the "Clear" button was clicked.
+            return redirect(url_for('index'))  # Redirects to the homepage to clear the form.
+
+        url = request.form['url']  # Retrieves the URL entered by the user.
+        phishing = is_domain_misspelled(url)  # Checks if the domain is misspelled or untrusted.
+        confidence = calculate_confidence(url)  # Calculates the confidence score for the URL.
+        stars = get_star_rating(confidence, phishing)  # Gets the star rating based on the confidence score and phishing status.
+        accuracy = compute_accuracy()  # Computes the accuracy of the model using test data.
+
+        if phishing:
+            result = "⚠️ Phishing Website."  # Displays a warning message for phishing websites.
+            result_class = 'phishing'  # Applies the "phishing" CSS class for styling.
+        else:
+            result = "✅ Legitimate Website."  # Displays a success message for legitimate websites.
+            result_class = 'legit'  # Applies the "legit" CSS class for styling.
+
+        return render_template_string(
+            template,
+            url=url,  # Passes the entered URL to the template.
+            result=result,  # Passes the result message to the template.
+            result_class=result_class,  # Passes the CSS class for styling the result.
+            confidence=confidence,  # Passes the confidence score to the template.
+            accuracy=accuracy,  # Passes the model accuracy to the template.
+            stars=stars  # Passes the star rating to the template.
+        )  # Renders the HTML template with dynamic content.
+
+    return render_template_string(template)  # Renders the HTML template for GET requests.
+
+# Open in browser
+def open_browser():
+    webbrowser.open_new('http://127.0.0.1:5000/')  # Opens the Flask app in the default web browser.
+
+if __name__ == '__main__':
+    threading.Timer(1.0, open_browser).start()  # Starts a timer to open the browser after 1 second.
+    app.run(debug=False)  # Runs the Flask app in production mode (debugging disabled).
